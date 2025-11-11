@@ -1,8 +1,6 @@
 import dataclasses
-from jaxmarl.environments.smax.OLD_smax_env import SMAX
-from jaxmarl.environments.smax.OLD_smax_env import State as SMAXState
-# from jaxmarl.environments.smax.smax_env import SMAX
-# from jaxmarl.environments.smax.smax_env import State as SMAXState
+from jaxmarl.environments.smax.smax_env import SMAX
+from jaxmarl.environments.smax.smax_env import State as SMAXState
 from jaxmarl.environments.smax.heuristic_enemy import (
     create_heuristic_policy,
     get_heuristic_policy_initial_state,
@@ -31,11 +29,7 @@ class EnemySMAX(MultiAgentEnv):
     not linked with any of the wrapper code because that is used differently."""
 
     def __init__(self, **env_kwargs):
-        # OLD_smax_env.SMAX doesn't accept use_sparse_rewards parameter
-        # because it ALREADY uses sparse rewards by default (only returns win/loss bonus)
-        # Filter it out to avoid TypeError
-        env_kwargs_filtered = {k: v for k, v in env_kwargs.items() if k != "use_sparse_rewards"}
-        self._env = SMAX(**env_kwargs_filtered)
+        self._env = SMAX(**env_kwargs)
         # only one team
         self.num_agents = self._env.num_allies
         self.num_enemies = self._env.num_enemies

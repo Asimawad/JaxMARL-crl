@@ -43,6 +43,8 @@ class Scenario:
 MAP_NAME_TO_SCENARIO = {
     # name: (unit_types, n_allies, n_enemies, SMACv2 position generation, SMACv2 unit generation)
     "3m": Scenario(jnp.zeros((6,), dtype=jnp.uint8), 3, 3, False, False),
+    "1m3m": Scenario(jnp.zeros((4,), dtype=jnp.uint8), 1, 3, False, False),
+    "1m8m": Scenario(jnp.zeros((9,), dtype=jnp.uint8), 1, 8, False, False),
     "2s3z": Scenario(
         jnp.array([2, 2, 3, 3, 3] * 2, dtype=jnp.uint8), 5, 5, False, False
     ),
@@ -143,7 +145,6 @@ class SMAX(MultiAgentEnv):
         smacv2_unit_type_generation=False,
         observation_type="unit_list",
         action_type="discrete",
-        use_sparse_rewards=False,  # If True, only give won_battle_bonus (zero out enemy_health_decrease_reward for ICRL)
     ) -> None:
         self.num_allies = num_allies if scenario is None else scenario.num_allies
         self.num_enemies = num_enemies if scenario is None else scenario.num_enemies
@@ -157,7 +158,6 @@ class SMAX(MultiAgentEnv):
         self.map_height = map_height
         self.scenario = scenario if scenario is None else scenario.unit_types
         self.use_self_play_reward = use_self_play_reward
-        self.use_sparse_rewards = use_sparse_rewards  # If True, only return won_battle_bonus (for ICRL)
         self.time_per_step = time_per_step
         self.unit_type_velocities = unit_type_velocities
         self.unit_type_weapon_cooldowns = unit_type_weapon_cooldowns
@@ -399,52 +399,24 @@ class SMAX(MultiAgentEnv):
 
             enemy_team_size = self.num_enemies if team_idx == 0 else self.num_allies
 
-            # CRL modification: Use semi-sparse reward (death indicator) when use_sparse_rewards=True
-            # This matches OLD_smax_env.py lines 403-415
-            def compute_sparse_reward():
-                """Semi-sparse reward: only triggers when units DIE (health goes from >0 to <=0)"""
-                death_indicator = jnp.where(
-                    jnp.logical_and(health_after <= 0, health_before > 0), 1.0, 0.0
-                )
-                enemy_health_decrease = jnp.sum(
-                    jax.lax.dynamic_slice_in_dim(
-                        death_indicator,  # Only count deaths
-                        other_team_start_idx,
-                        enemy_team_size,
-                    )
-                )
-                # No division by enemy_team_size (matches OLD_smax_env.py line 415)
-                enemy_health_decrease_reward = jnp.abs(enemy_health_decrease)
-                enemy_health_decrease_reward = jax.lax.select(
-                    self.use_self_play_reward, 0.0, enemy_health_decrease_reward
-                )
-                return enemy_health_decrease_reward
+            #semi sparse reward
+            death_indicator = jnp.where(jnp.logical_and(health_after <= 0, health_before > 0), 1.0, 0.0)
 
-            def compute_dense_reward():
-                """Dense reward: continuous health decrease (standard JaxMARL)"""
-                enemy_health_decrease = jnp.sum(
-                    jax.lax.dynamic_slice_in_dim(
-                        (health_after - health_before)
-                        / self.unit_type_health[state.unit_types],
-                        other_team_start_idx,
-                        enemy_team_size,
-                    )
+            enemy_health_decrease = jnp.sum(
+                jax.lax.dynamic_slice_in_dim(
+                    # (health_after - health_before)
+                    # / self.unit_type_health[state.unit_types],
+                    death_indicator, #for semi-sparse reward
+                    other_team_start_idx,
+                    enemy_team_size,
                 )
-                enemy_health_decrease_reward = (
-                    jnp.abs(enemy_health_decrease) / enemy_team_size
-                )
-                enemy_health_decrease_reward = jax.lax.select(
-                    self.use_self_play_reward, 0.0, enemy_health_decrease_reward
-                )
-                return enemy_health_decrease_reward
-
-            # Choose reward computation based on use_sparse_rewards flag
-            enemy_health_decrease_reward = jax.lax.cond(
-                self.use_sparse_rewards,
-                lambda: compute_sparse_reward(),
-                lambda: compute_dense_reward(),
             )
-
+            enemy_health_decrease_reward = (
+                jnp.abs(enemy_health_decrease) #/ enemy_team_size #for semi-sparse reward
+            )
+            enemy_health_decrease_reward = jax.lax.select(
+                self.use_self_play_reward, 0.0, enemy_health_decrease_reward
+            )
             won_battle = jnp.all(
                 jnp.logical_not(
                     jax.lax.dynamic_slice_in_dim(
@@ -475,14 +447,9 @@ class SMAX(MultiAgentEnv):
             won_battle_bonus = jax.lax.cond(
                 won_battle & ~lost_battle, lambda: self.won_battle_bonus, lambda: 0.0
             )
-            # CRL modification: When use_sparse_rewards=True, return ONLY win/loss bonus
-            # This matches OLD_smax_env.py line 450: return won_battle_bonus + lost_battle_bonus
-            # When use_sparse_rewards=False, include enemy_health_decrease_reward (default JaxMARL)
-            return jax.lax.cond(
-                self.use_sparse_rewards,
-                lambda: won_battle_bonus + lost_battle_bonus,  # Sparse: only win/loss
-                lambda: enemy_health_decrease_reward + won_battle_bonus + lost_battle_bonus,  # Dense
-            )
+            return won_battle_bonus + lost_battle_bonus
+            # return won_battle_bonus + lost_battle_bonus
+
 
         # agents still get reward when they are dead to allow for noble sacrifice
         team_rewards = [compute_team_reward(i) for i in range(2)]
@@ -552,28 +519,42 @@ class SMAX(MultiAgentEnv):
     def _decode_discrete_actions(
         self, actions: chex.Array
     ) -> Tuple[chex.Array, chex.Array]:
-        def _decode_movement_action(action):
-            vec = jax.lax.cond(
-                # action is an attack action OR stop (action 4)
-                action >= self.num_movement_actions - 1,
-                lambda: jnp.zeros((2,)),
-                lambda: jnp.array(
-                    [
-                        (-1) ** (action // 2) * (1.0 / jnp.sqrt(2)),
-                        (-1) ** (action // 2 + action % 2) * (1.0 / jnp.sqrt(2)),
-                    ]
-                ),
-            )
-            rotation = jnp.array(
-                [
-                    [1.0 / jnp.sqrt(2), -1.0 / jnp.sqrt(2)],
-                    [1.0 / jnp.sqrt(2), 1.0 / jnp.sqrt(2)],
-                ]
-            )
-            vec = rotation @ vec
-            return vec
-
-        movement_actions = jax.vmap(_decode_movement_action)(actions)
+        # CRITICAL FIX: Use vectorized operations instead of jax.lax.cond to support batched inputs
+        # When called from evaluator with vmap, actions can have shape (num_envs, num_agents)
+        # jax.lax.cond requires scalar predicate, but vectorized operations work with any shape
+        # Check if action is an attack action OR stop (action 4)
+        is_attack_or_stop = actions >= self.num_movement_actions - 1
+        
+        # Compute movement vector for all actions (we'll zero it out for attack/stop later)
+        # For movement actions (0-3): compute direction vector
+        # Original logic: direction based on action value
+        move_dir_x = (-1) ** (actions // 2) * (1.0 / jnp.sqrt(2))
+        move_dir_y = (-1) ** (actions // 2 + actions % 2) * (1.0 / jnp.sqrt(2))
+        
+        # Stack into (..., 2) shape - handle any number of batch dimensions
+        move_vec = jnp.stack([move_dir_x, move_dir_y], axis=-1)
+        
+        # Apply rotation matrix: 45 degrees counterclockwise
+        # [cos(45) -sin(45)]   [1/√2 -1/√2]
+        # [sin(45)  cos(45)] = [1/√2  1/√2]
+        rotation = jnp.array(
+            [
+                [1.0 / jnp.sqrt(2), -1.0 / jnp.sqrt(2)],
+                [1.0 / jnp.sqrt(2), 1.0 / jnp.sqrt(2)],
+            ]
+        )
+        # Apply rotation: move_vec @ rotation.T works for any batch shape
+        # move_vec shape: (..., 2), rotation.T shape: (2, 2)
+        # Result: (..., 2) - broadcasts correctly
+        movement_actions = jnp.dot(move_vec, rotation.T)
+        
+        # Zero out movement for attack/stop actions using jnp.where (supports batching)
+        movement_actions = jnp.where(
+            jnp.expand_dims(is_attack_or_stop, axis=-1),
+            jnp.zeros_like(movement_actions),
+            movement_actions
+        )
+        
         attack_actions = jnp.where(
             actions > self.num_movement_actions - 1, actions, jnp.zeros_like(actions)
         )
@@ -587,6 +568,9 @@ class SMAX(MultiAgentEnv):
         action_idx = self.continuous_action_dims.index("do_shoot")
         theta_idx = self.continuous_action_dims.index("coordinate_2")
         r_idx = self.continuous_action_dims.index("coordinate_1")
+
+#        jax.debug.print("shoot last ss: {}", actions[:, shoot_last_idx])
+
         shoot_last_enemy_logits = jnp.array(
             [
                 jnp.log(actions[:, shoot_last_idx]),
@@ -620,8 +604,8 @@ class SMAX(MultiAgentEnv):
         # convert positions from polar to x-y coordinates
         positions = jnp.stack(
             [
-                actions[:, r_idx] * jnp.cos(actions[:, theta_idx] * 2 * math.pi),
-                actions[:, r_idx] * jnp.sin(actions[:, theta_idx] * 2 * math.pi),
+                self.unit_type_attack_ranges[state.unit_types] * actions[:, r_idx] * jnp.cos(actions[:, theta_idx] * 2 * math.pi),
+                self.unit_type_attack_ranges[state.unit_types] * actions[:, r_idx] * jnp.sin(actions[:, theta_idx] * 2 * math.pi),
             ],
             axis=-1,
         )
@@ -658,6 +642,10 @@ class SMAX(MultiAgentEnv):
         attack_actions = jax.vmap(get_attack_action)(
             jnp.arange(self.num_agents), positions
         )
+
+        # jax.debug.print("ATTACK ACTIONS:")
+        # jax.debug.print("{}", attack_actions)
+
         return movement_actions, attack_actions
 
     @partial(jax.jit, static_argnums=(0,))
@@ -899,6 +887,7 @@ class SMAX(MultiAgentEnv):
         )
         features = features.at[3].set(state.unit_weapon_cooldowns[i])
         features = features.at[4 + state.unit_types[i]].set(1)
+#        jax.debug.print("own features: {} {}", features, state.unit_alive)
         return jax.lax.cond(
             state.unit_alive[i], lambda: features, lambda: empty_features
         )
@@ -944,6 +933,7 @@ class SMAX(MultiAgentEnv):
         get_all_self_features = jax.vmap(self._get_own_features, in_axes=(None, 0))
         own_unit_obs = get_all_self_features(state, jnp.arange(self.num_agents))
         obs = jnp.concatenate([other_unit_obs, own_unit_obs], axis=-1)
+#        jax.debug.print("obs: {}", obs)
         return {agent: obs[self.agent_ids[agent]] for agent in self.agents}
 
     @partial(jax.jit, static_argnums=(0,))

@@ -399,52 +399,20 @@ class SMAX(MultiAgentEnv):
 
             enemy_team_size = self.num_enemies if team_idx == 0 else self.num_allies
 
-            # CRL modification: Use semi-sparse reward (death indicator) when use_sparse_rewards=True
-            # This matches OLD_smax_env.py lines 403-415
-            def compute_sparse_reward():
-                """Semi-sparse reward: only triggers when units DIE (health goes from >0 to <=0)"""
-                death_indicator = jnp.where(
-                    jnp.logical_and(health_after <= 0, health_before > 0), 1.0, 0.0
+            enemy_health_decrease = jnp.sum(
+                jax.lax.dynamic_slice_in_dim(
+                    (health_after - health_before)
+                    / self.unit_type_health[state.unit_types],
+                    other_team_start_idx,
+                    enemy_team_size,
                 )
-                enemy_health_decrease = jnp.sum(
-                    jax.lax.dynamic_slice_in_dim(
-                        death_indicator,  # Only count deaths
-                        other_team_start_idx,
-                        enemy_team_size,
-                    )
-                )
-                # No division by enemy_team_size (matches OLD_smax_env.py line 415)
-                enemy_health_decrease_reward = jnp.abs(enemy_health_decrease)
-                enemy_health_decrease_reward = jax.lax.select(
-                    self.use_self_play_reward, 0.0, enemy_health_decrease_reward
-                )
-                return enemy_health_decrease_reward
-
-            def compute_dense_reward():
-                """Dense reward: continuous health decrease (standard JaxMARL)"""
-                enemy_health_decrease = jnp.sum(
-                    jax.lax.dynamic_slice_in_dim(
-                        (health_after - health_before)
-                        / self.unit_type_health[state.unit_types],
-                        other_team_start_idx,
-                        enemy_team_size,
-                    )
-                )
-                enemy_health_decrease_reward = (
-                    jnp.abs(enemy_health_decrease) / enemy_team_size
-                )
-                enemy_health_decrease_reward = jax.lax.select(
-                    self.use_self_play_reward, 0.0, enemy_health_decrease_reward
-                )
-                return enemy_health_decrease_reward
-
-            # Choose reward computation based on use_sparse_rewards flag
-            enemy_health_decrease_reward = jax.lax.cond(
-                self.use_sparse_rewards,
-                lambda: compute_sparse_reward(),
-                lambda: compute_dense_reward(),
             )
-
+            enemy_health_decrease_reward = (
+                jnp.abs(enemy_health_decrease) / enemy_team_size
+            )
+            enemy_health_decrease_reward = jax.lax.select(
+                self.use_self_play_reward, 0.0, enemy_health_decrease_reward
+            )
             won_battle = jnp.all(
                 jnp.logical_not(
                     jax.lax.dynamic_slice_in_dim(
@@ -475,14 +443,17 @@ class SMAX(MultiAgentEnv):
             won_battle_bonus = jax.lax.cond(
                 won_battle & ~lost_battle, lambda: self.won_battle_bonus, lambda: 0.0
             )
-            # CRL modification: When use_sparse_rewards=True, return ONLY win/loss bonus
-            # This matches OLD_smax_env.py line 450: return won_battle_bonus + lost_battle_bonus
-            # When use_sparse_rewards=False, include enemy_health_decrease_reward (default JaxMARL)
-            return jax.lax.cond(
+            # CRL modification: For sparse rewards (ICRL), zero out enemy_health_decrease_reward
+            # This matches CRL's OLD_smax_env.py line 450: return won_battle_bonus + lost_battle_bonus
+            # When use_sparse_rewards=False, include enemy_health_decrease_reward (default JaxMARL behavior)
+            # Zero out enemy_health_decrease_reward if sparse rewards are enabled
+            enemy_health_decrease_reward = jax.lax.select(
                 self.use_sparse_rewards,
-                lambda: won_battle_bonus + lost_battle_bonus,  # Sparse: only win/loss
-                lambda: enemy_health_decrease_reward + won_battle_bonus + lost_battle_bonus,  # Dense
+                0.0,  # Sparse: zero out health decrease reward
+                enemy_health_decrease_reward,  # Dense: keep health decrease reward
             )
+            # Return reward (sparse: only win/loss bonus, dense: includes health decrease)
+            return enemy_health_decrease_reward + won_battle_bonus + lost_battle_bonus
 
         # agents still get reward when they are dead to allow for noble sacrifice
         team_rewards = [compute_team_reward(i) for i in range(2)]
