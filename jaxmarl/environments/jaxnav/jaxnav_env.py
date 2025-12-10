@@ -85,7 +85,7 @@ def discrete_act_map(action: int) -> jnp.ndarray:
 ## ---- Environment defaults ----
 AGENT_BASE = "agent"
 MAP_PARAMS = {
-    "map_size": (11, 11),
+    "map_size": (7, 7),
     "fill": 0.3,
 }
 
@@ -97,7 +97,7 @@ class JaxNav(MultiAgentEnv):
     """
         
     def __init__(self,
-                 num_agents: int = 2, # Number of agents
+                 num_agents: int, # Number of agents
                  act_type="Continuous", # Action type, either Continuous or Discrete
                  normalise_obs=True,
                  rad=0.3,  # Agent radius, TODO remove dependency on this
@@ -112,25 +112,25 @@ class JaxNav(MultiAgentEnv):
                  min_v=0.0,
                  max_v=1.0, 
                  max_v_acc=1.0,
-                 max_w=0.6,
+                 max_w=1.0,
                  max_w_acc=1.0,
                  max_steps=500,
                  dt=0.1,
                  fixed_lambda=True,
-                 rew_lambda=0.5, # linear interpolation between individual and team rewards
+                 rew_lambda=1.0, # linear interpolation between individual and team rewards
                  lambda_range=[0.0, 1.0],
-                 goal_radius=0.5,
+                 goal_radius=0.3,
                  goal_rew=4.0,
                  weight_g=0.25,
                  lim_w=0.7,
                  weight_w=-0.0,
                  dt_rew=-0.01,
-                 coll_rew=-4.0,
+                 coll_rew=-5.0,
                  lidar_thresh=0.1,
                  lidar_rew=-0.1,
                  do_sep_reward=False,
                  share_only_sparse=False,
-                 info_by_agent=True,
+                 info_by_agent=False,
         ):
         super().__init__(num_agents)
         
@@ -494,7 +494,7 @@ class JaxNav(MultiAgentEnv):
         theta = wrap(theta + w*self.dt)
         
         out = (pos, theta, jnp.array([v, w], dtype=jnp.float32))
-        return jax.tree.map(lambda x, y: jax.lax.select(done, x, y), out_done, out)  
+        return jax.tree_util.tree_map(lambda x, y: jax.lax.select(done, x, y), out_done, out)  
         
     @partial(jax.vmap, in_axes=(None, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
     def compute_reward(
@@ -598,10 +598,10 @@ class JaxNav(MultiAgentEnv):
             key, state, actions
         )
         obs_re, state_re = self.reset_to_level(level)  # todo maybe should be set state depending on PLR code
-        state = jax.tree.map(
+        state = jax.tree_util.tree_map(
             lambda x, y: jax.lax.select(state_st.ep_done, x, y), state_re, state_st
         )
-        obs = jax.tree.map(
+        obs = jax.tree_util.tree_map(
             lambda x, y: jax.lax.select(state_st.ep_done, x, y), obs_re, obs_st
         )
         #obs = jax.lax.select(state_st.ep_done, obs_re, obs_st)

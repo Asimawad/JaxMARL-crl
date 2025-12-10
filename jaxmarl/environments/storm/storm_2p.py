@@ -727,7 +727,7 @@ class InTheGrid_2p(MultiAgentEnv):
                 state.freeze > 0, state.freeze - 1, state.freeze
             ))
             state_sft_re = _soft_reset_state(key, state)
-            state = jax.tree.map(
+            state = jax.tree_util.tree_map(
                 lambda x, y: jnp.where(state.freeze == 0, x, y),
                 state_sft_re,
                 state,
@@ -755,7 +755,7 @@ class InTheGrid_2p(MultiAgentEnv):
             # if inner episode is done, return start state for next game
             state_re = _reset_state(key)
             state_re = state_re.replace(outer_t=outer_t + 1)
-            state = jax.tree.map(
+            state = jax.tree_util.tree_map(
                 lambda x, y: jax.lax.select(reset_inner, x, y),
                 state_re,
                 state_nxt,
@@ -908,29 +908,6 @@ class InTheGrid_2p(MultiAgentEnv):
         self.num_inner_steps = num_inner_steps
         self.num_outer_steps = num_outer_steps
 
-        _shape = (
-            (OBS_SIZE, OBS_SIZE, len(Items) - 1 + 4)
-            if self.cnn
-            else (OBS_SIZE**2 * (len(Items) - 1 + 4),)
-        )
-        self.observation_spaces = {
-            a: {
-                "observation": spaces.Box(
-                low=0, high=1, shape=_shape, dtype=jnp.uint8
-                ),
-                "inventory": spaces.Box(
-                    low=0,
-                    high=NUM_COINS,
-                    shape=NUM_COIN_TYPES + 4,
-                    dtype=jnp.uint8,
-                ),
-            } for a in self.agents
-        }
-
-        self.action_spaces = {
-            a: spaces.Discrete(len(Actions)) for a in self.agents
-        }
-
     @property
     def name(self) -> str:
         """Environment name."""
@@ -941,13 +918,31 @@ class InTheGrid_2p(MultiAgentEnv):
         """Number of actions possible in environment."""
         return len(Actions)
 
-    def action_space(self, agent: str) -> spaces.Discrete:
+    def action_space(
+        self, agent_id: Union[int, None] = None
+    ) -> spaces.Discrete:
         """Action space of the environment."""
-        return self.action_spaces[agent]
+        return spaces.Discrete(len(Actions))
 
-    def observation_space(self, agent:str) -> spaces.Dict:
+    def observation_space(self) -> spaces.Dict:
         """Observation space of the environment."""
-        return self.observation_spaces[agent]
+        _shape = (
+            (OBS_SIZE, OBS_SIZE, len(Items) - 1 + 4)
+            if self.cnn
+            else (OBS_SIZE**2 * (len(Items) - 1 + 4),)
+        )
+
+        return {
+            "observation": spaces.Box(
+                low=0, high=1, shape=_shape, dtype=jnp.uint8
+            ),
+            "inventory": spaces.Box(
+                low=0,
+                high=NUM_COINS,
+                shape=NUM_COIN_TYPES + 4,
+                dtype=jnp.uint8,
+            ),
+        }
 
     def state_space(self) -> spaces.Dict:
         """State space of the environment."""

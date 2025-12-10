@@ -5,7 +5,7 @@ from typing import Tuple, Dict
 from functools import partial
 from jaxmarl.environments.mpe.simple import SimpleMPE, State
 from jaxmarl.environments.mpe.default_params import *
-from jaxmarl.environments.spaces import Box, Discrete
+from gymnax.environments.spaces import Box, Discrete
 
 # Obstacle Colours
 OBS_COLOUR = [(191, 64, 64), (64, 191, 64), (64, 64, 191)]
@@ -17,7 +17,6 @@ class SimpleReferenceMPE(SimpleMPE):
         num_landmarks=3,
         local_ratio=0.5,
         action_type=DISCRETE_ACT,
-        **kwargs,
     ):
         assert num_agents == 2, "SimpleReferenceMPE only supports 2 agents"
         assert num_landmarks == 3, "SimpleReferenceMPE only supports 3 landmarks"
@@ -58,7 +57,6 @@ class SimpleReferenceMPE(SimpleMPE):
             colour=colour,
             silent=silent,
             collide=collide,
-            **kwargs,
         )
 
     def reset(self, key: chex.PRNGKey) -> Tuple[chex.Array, State]:

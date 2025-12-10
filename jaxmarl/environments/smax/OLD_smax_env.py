@@ -43,7 +43,8 @@ class Scenario:
 MAP_NAME_TO_SCENARIO = {
     # name: (unit_types, n_allies, n_enemies, SMACv2 position generation, SMACv2 unit generation)
     "3m": Scenario(jnp.zeros((6,), dtype=jnp.uint8), 3, 3, False, False),
-    "1m3m": Scenario(jnp.zeros((9,), dtype=jnp.uint8), 1, 8, False, False),
+    "1m3m": Scenario(jnp.zeros((4,), dtype=jnp.uint8), 1, 3, False, False),
+    "1m8m": Scenario(jnp.zeros((9,), dtype=jnp.uint8), 1, 8, False, False),
     "2s3z": Scenario(
         jnp.array([2, 2, 3, 3, 3] * 2, dtype=jnp.uint8), 5, 5, False, False
     ),
@@ -397,9 +398,9 @@ class SMAX(MultiAgentEnv):
             team_size = self.num_allies if team_idx == 0 else self.num_enemies
 
             enemy_team_size = self.num_enemies if team_idx == 0 else self.num_allies
-            
+
             #semi sparse reward
-            death_indicator = jnp.where(health_after <= 0 & health_before > 0, 1, 0)
+            death_indicator = jnp.where(jnp.logical_and(health_after <= 0, health_before > 0), 1.0, 0.0)
 
             enemy_health_decrease = jnp.sum(
                 jax.lax.dynamic_slice_in_dim(
@@ -411,7 +412,7 @@ class SMAX(MultiAgentEnv):
                 )
             )
             enemy_health_decrease_reward = (
-                jnp.abs(enemy_health_decrease) / enemy_team_size
+                jnp.abs(enemy_health_decrease) #/ enemy_team_size #for semi-sparse reward
             )
             enemy_health_decrease_reward = jax.lax.select(
                 self.use_self_play_reward, 0.0, enemy_health_decrease_reward
@@ -446,7 +447,9 @@ class SMAX(MultiAgentEnv):
             won_battle_bonus = jax.lax.cond(
                 won_battle & ~lost_battle, lambda: self.won_battle_bonus, lambda: 0.0
             )
-            return enemy_health_decrease_reward + won_battle_bonus + lost_battle_bonus
+            return won_battle_bonus + lost_battle_bonus
+            # return won_battle_bonus + lost_battle_bonus
+
 
         # agents still get reward when they are dead to allow for noble sacrifice
         team_rewards = [compute_team_reward(i) for i in range(2)]
@@ -458,10 +461,9 @@ class SMAX(MultiAgentEnv):
     @partial(jax.jit, static_argnums=(0,))
     def is_terminal(self, state):
         all_dead = jnp.all(jnp.logical_not(state.unit_alive[: self.num_allies]))
-        # all_enemy_dead = jnp.all(jnp.logical_not(state.unit_alive[self.num_allies :]))
+        all_enemy_dead = jnp.all(jnp.logical_not(state.unit_alive[self.num_allies :]))
         over_time_limit = state.time >= self.max_steps
-        # MODIFIED: Removed all_enemy_dead and all_dead
-        return over_time_limit
+        return all_dead | all_enemy_dead | over_time_limit
 
     def _update_dead_agents(
         self,
@@ -586,38 +588,25 @@ class SMAX(MultiAgentEnv):
         )
         # attack actions
         # convert positions from polar to x-y coordinates
-        
-        #MODIFIED CALCULATION OF POSITIONS (THEY ARE NOW UNIT OFFSET VECTORS)
         positions = jnp.stack(
             [
-                #self.unit_type_attack_ranges[state.unit_types] * actions[:, r_idx] * jnp.cos(actions[:, theta_idx] * 2 * math.pi),
-                #self.unit_type_attack_ranges[state.unit_types] * actions[:, r_idx] * jnp.sin(actions[:, theta_idx] * 2 * math.pi),
-                jnp.cos(actions[:, theta_idx] * 2 * math.pi),
-                jnp.sin(actions[:, theta_idx] * 2 * math.pi),
+                self.unit_type_attack_ranges[state.unit_types] * actions[:, r_idx] * jnp.cos(actions[:, theta_idx] * 2 * math.pi),
+                self.unit_type_attack_ranges[state.unit_types] * actions[:, r_idx] * jnp.sin(actions[:, theta_idx] * 2 * math.pi),
             ],
             axis=-1,
         )
-        #positions = state.unit_positions + positions
-        
+        positions = state.unit_positions + positions
+
         # get the closest enemy to each of these positions
         def get_attack_action(idx, position):
             team = idx < self.num_allies
             team_mask = jnp.zeros((self.num_agents,))
             team_mask = team_mask.at[: self.num_allies].set(idx < self.num_allies)
             team_mask = team_mask.at[self.num_allies :].set(idx >= self.num_allies)
-            
-            #dist = jnp.linalg.norm(state.unit_positions - position, axis=-1)
-            
-            #MODIFIED CALCULATION OF DIST
-            unit_offsets = state.unit_positions - state.unit_positions[idx]
-            unit_offsets = unit_offsets / jnp.linalg.norm(unit_offsets, axis=-1)[:, None]
-            dist = jnp.linalg.norm(unit_offsets - position, axis=-1)
-            dist = jnp.where(jnp.isnan(dist), 1e8, dist)
-            
+            dist = jnp.linalg.norm(state.unit_positions - position, axis=-1)
             # add artificially large distance to allies so they aren't the minimum
             dist = dist + team_mask * 1e8
             min_dist_idx = jnp.argmin(dist)
-            # jax.debug.print("MIN IDX: {}", min_dist_idx)
             # only need to check whether we have chosen to shoot at an enemy here.
             shootable = (move_or_shoot[idx] == 1) & jnp.logical_not(
                 team_mask[min_dist_idx]

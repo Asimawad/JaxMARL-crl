@@ -10,7 +10,7 @@ import numpy as onp
 from jaxmarl.environments.multi_agent_env import MultiAgentEnv
 from jaxmarl.environments.mpe.default_params import *
 import chex
-from jaxmarl.environments.spaces import Box, Discrete
+from gymnax.environments.spaces import Box, Discrete
 from flax import struct
 from typing import Tuple, Optional, Dict
 from functools import partial
@@ -416,7 +416,7 @@ class SimpleMPE(MultiAgentEnv):
         p_forces = __env_force_outer(self.entity_range)
         p_forces = jnp.sum(p_forces, axis=0)
 
-        return p_forces + p_force_all
+        return 0*p_forces + p_force_all
 
     @partial(jax.vmap, in_axes=[None, 0, 0, 0, 0, 0, 0])
     def _integrate_state(self, p_force, p_pos, p_vel, mass, moveable, max_speed):

@@ -11,7 +11,8 @@ from jaxmarl.environments.mpe.simple import (
     OBS_COLOUR,
 )
 from jaxmarl.environments.mpe.default_params import *
-from jaxmarl.environments.spaces import Box, Discrete
+from gymnax.environments.spaces import Box, Discrete
+
 
 # NOTE food and forests are part of world.landmarks
 
@@ -31,7 +32,6 @@ class SimpleWorldCommMPE(SimpleMPE):
         num_food=2,
         num_forests=2,
         action_type=CONTINUOUS_ACT,
-        **kwargs,
     ):
         # Fixed parameters
         dim_c = 4  # communication channel dimension
@@ -133,7 +133,6 @@ class SimpleWorldCommMPE(SimpleMPE):
             collide=collide,
             accel=accel,
             max_speed=max_speed,
-            **kwargs,
         )
 
     def set_actions(self, actions: dict):

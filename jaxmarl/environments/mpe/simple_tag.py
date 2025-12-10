@@ -4,7 +4,7 @@ import chex
 from typing import Tuple, Dict
 from functools import partial
 from jaxmarl.environments.mpe.simple import SimpleMPE, State
-from jaxmarl.environments.spaces import Box
+from gymnax.environments.spaces import Box
 from jaxmarl.environments.mpe.default_params import *
 
 
@@ -15,7 +15,6 @@ class SimpleTagMPE(SimpleMPE):
         num_adversaries=3,
         num_obs=2,
         action_type=DISCRETE_ACT,
-        **kwargs,
     ):
         dim_c = 2  # NOTE follows code rather than docs
 
@@ -81,7 +80,6 @@ class SimpleTagMPE(SimpleMPE):
             accel=accel,
             max_speed=max_speed,
             collide=collide,
-            **kwargs,
         )
 
     def get_obs(self, state: State) -> Dict[str, chex.Array]:

@@ -1,8 +1,8 @@
 import dataclasses
-from jaxmarl.environments.smax.OLD_smax_env import SMAX
-from jaxmarl.environments.smax.OLD_smax_env import State as SMAXState
-# from jaxmarl.environments.smax.smax_env import SMAX
-# from jaxmarl.environments.smax.smax_env import State as SMAXState
+from jaxmarl.environments.smax.smax_env import SMAX
+from jaxmarl.environments.smax.smax_env import State as SMAXState
+# from jaxmarl.environments.smax.OLD_smax_env import SMAX
+# from jaxmarl.environments.smax.OLD_smax_env import State as SMAXState
 
 from jaxmarl.environments.smax.heuristic_enemy import (
     create_heuristic_policy,
@@ -85,7 +85,11 @@ class EnemySMAX(MultiAgentEnv):
         enemy_movement_actions, enemy_attack_actions = (
             self._env._decode_discrete_actions(enemy_actions)
         )
-        
+
+        #make enemy idle
+        enemy_movement_actions = jnp.zeros_like(enemy_movement_actions)
+        enemy_attack_actions = jnp.zeros_like(enemy_attack_actions)
+
         if self._env.action_type == "continuous":
             cont_actions = jnp.zeros((len(self.all_agents), 4))
             cont_actions = cont_actions.at[: self.num_allies].set(actions)

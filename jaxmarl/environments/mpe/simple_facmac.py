@@ -4,7 +4,7 @@ import chex
 from typing import Tuple, Dict
 from functools import partial
 from jaxmarl.environments.mpe.simple import State, SimpleMPE
-from jaxmarl.environments.spaces import Box
+from gymnax.environments.spaces import Box
 from jaxmarl.environments.mpe.default_params import *
 
 
@@ -22,8 +22,7 @@ class SimpleFacmacMPE(SimpleMPE):
         num_adversaries=3,
         num_landmarks=2,
         view_radius=1.5,  # set -1 to deactivate
-        score_function="sum",
-        **kwargs,
+        score_function="sum"
     ):
         dim_c = 2  # NOTE follows code rather than docs
         action_type = CONTINUOUS_ACT
@@ -81,14 +80,13 @@ class SimpleFacmacMPE(SimpleMPE):
             accel=accel,
             max_speed=max_speed,
             collide=collide,
-            **kwargs,
         )
 
         # Overwrite action and observation spaces
         self.observation_spaces = {
-            i: Box(-jnp.inf, jnp.inf, (16,)) for i in agents
+            i: Box(-jnp.inf, jnp.inf, (16,)) for i in self.adversaries
         }
-        self.action_spaces = {i: Box(0.0, 1.0, (5,)) for i in agents}
+        self.action_spaces = {i: Box(0.0, 1.0, (5,)) for i in self.adversaries}
 
         # Introduce partial observability by limiting the agents' view radii
         self.view_radius = jnp.concatenate(
@@ -176,7 +174,7 @@ class SimpleFacmacMPE(SimpleMPE):
             raise Exception("Unknown score function {}".format(self.score_function))
         # move to best position
         best_idx = jnp.argmax(scores)
-        chosen_action = jnp.array([x[best_idx], y[best_idx]], dtype=jnp.float32)
+        chosen_action = 30*jnp.array([x[best_idx], y[best_idx]], dtype=jnp.float32)
         chosen_action = jax.lax.cond(scores[best_idx] < 0, lambda: chosen_action*0.0, lambda: chosen_action)
         return chosen_action
 
@@ -196,7 +194,7 @@ class SimpleFacmacMPE(SimpleMPE):
             )
 
         key, key_w = jax.random.split(key)
-        p_pos, p_vel = self._world_step(key_w, state, u)
+        p_pos, p_vel  = self._world_step(key_w, state, u)
 
         key_c = jax.random.split(key, self.num_agents)
         c = self._apply_comm_action(key_c, c, self.c_noise, self.silent)
@@ -248,9 +246,9 @@ class SimpleFacmacMPE(SimpleMPE):
             landmark_mask = jnp.sqrt(jnp.sum(landmark_pos ** 2)) > self.view_radius[aidx]
             landmark_pos = jnp.where(landmark_mask, 0.0, landmark_pos)
 
-            other_mask = jnp.sqrt(jnp.sum(other_pos ** 2)) > self.view_radius[aidx]
-            other_pos = jnp.where(other_mask, 0.0, other_pos)
-            other_vel = jnp.where(other_mask, 0.0, other_vel)
+            other_mask = jnp.sqrt(jnp.sum(other_pos ** 2, axis=1)) > self.view_radius[aidx]
+            other_pos = jnp.where(other_mask[:,None], 0.0, other_pos)
+            other_vel = jnp.where(other_mask[:,None], 0.0, other_vel)
 
             return landmark_pos, other_pos, other_vel
 

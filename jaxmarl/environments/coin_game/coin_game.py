@@ -68,8 +68,7 @@ class CoinGame(MultiAgentEnv):
         super().__init__(num_agents=2)
         self.agents = [str(i) for i in list(range(2))]
         self.payoff_matrix = payoff_matrix
-        self.cnn = cnn
-        
+
         # helper functions
         def _update_stats(
             state: EnvState,
@@ -199,14 +198,6 @@ class CoinGame(MultiAgentEnv):
             if not cnn:
                 return {agent: obs[agent].flatten() for agent in obs}
             return obs
-        
-        _shape = (3, 3, 4) if self.cnn else (36,)
-        self.observation_spaces = {
-            a: spaces.Box(low=0, high=1, shape=_shape, dtype=jnp.uint8) for a in self.agents
-        }
-        self.action_spaces = {
-            a: spaces.Discrete(5) for a in self.agents
-        }    
 
         def _step(
             key: chex.PRNGKey,
@@ -410,7 +401,7 @@ class CoinGame(MultiAgentEnv):
         # overwrite Gymnax as it makes single-agent assumptions
         self.step = jax.jit(_step)
         self.reset = jax.jit(_reset)
-        
+        self.cnn = cnn
 
         self.step = _step
         self.reset = _reset
@@ -425,13 +416,14 @@ class CoinGame(MultiAgentEnv):
         """Number of actions possible in environment."""
         return 5
 
-    def action_space(self, agent: str) -> spaces.Discrete:
+    def action_space(self, agent_id=None) -> spaces.Discrete:
         """Action space of the environment."""
-        return self.action_spaces[agent]
+        return spaces.Discrete(5)
 
-    def observation_space(self, agent: str) -> spaces.Box:
+    def observation_space(self) -> spaces.Box:
         """Observation space of the environment."""
-        return self.observation_spaces[agent]
+        _shape = (3, 3, 4) if self.cnn else (36,)
+        return spaces.Box(low=0, high=1, shape=_shape, dtype=jnp.uint8)
 
     def state_space(self) -> spaces.Dict:
         """State space of the environment."""
