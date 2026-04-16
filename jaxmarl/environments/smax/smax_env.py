@@ -137,6 +137,7 @@ class SMAX(MultiAgentEnv):
         use_self_play_reward=False,
         see_enemy_actions=True,
         won_battle_bonus=1.0,
+        reward_type="dense",
         walls_cause_death=True,
         max_steps=100,
         smacv2_position_generation=False,
@@ -167,6 +168,7 @@ class SMAX(MultiAgentEnv):
         self.unit_type_bits = len(self.unit_type_names)
         self.max_steps = max_steps
         self.won_battle_bonus = won_battle_bonus
+        self.reward_type = reward_type
         self.see_enemy_actions = see_enemy_actions
         self.smacv2_unit_type_generation = (
             smacv2_unit_type_generation
@@ -386,68 +388,152 @@ class SMAX(MultiAgentEnv):
 
     @partial(jax.jit, static_argnums=(0,))
     def compute_reward(self, state, health_before, health_after):
-        @partial(jax.jit, static_argnums=(0,))
-        def compute_team_reward(team_idx):
-            # compute how much the enemy team health has decreased
-            other_team_idx = jnp.logical_not(team_idx).astype(jnp.uint32)
-            other_team_start_idx = jnp.array([0, self.num_allies])[other_team_idx]
-            team_start_idx = jnp.array([0, self.num_allies])[team_idx]
+        """Compute per-team or per-agent reward according to self.reward_type.
 
-            team_size = self.num_allies if team_idx == 0 else self.num_enemies
+        Reward types
+        ------------
+        dense             : team-shared normalised health-damage per step + win bonus
+        sparse            : team-shared win bonus only, no per-step signal
+        death_triggered   : team-shared kill bonus per enemy death + win bonus
+        individual_dense  : per-ally normalised damage to own target + shared win bonus
+        individual_sparse : per-ally kill credit when own target dies + shared win bonus
 
-            enemy_team_size = self.num_enemies if team_idx == 0 else self.num_allies
+        In all cases the lost_battle_bonus (-won_battle_bonus) is applied when
+        use_self_play_reward=True so the game stays zero-sum for self-play.
+        """
+        # --- Terminal outcome flags (shared across all reward types) ---
+        won = jnp.all(~state.unit_alive[self.num_allies:])  # all enemies dead
+        lost = jnp.all(~state.unit_alive[: self.num_allies])  # all allies dead
 
-            enemy_health_decrease = jnp.sum(
-                jax.lax.dynamic_slice_in_dim(
-                    (health_after - health_before)
-                    / self.unit_type_health[state.unit_types],
-                    other_team_start_idx,
-                    enemy_team_size,
-                )
-            )
-            enemy_health_decrease_reward = (
-                jnp.abs(enemy_health_decrease) / enemy_team_size
-            )
-            enemy_health_decrease_reward = jax.lax.select(
-                self.use_self_play_reward, 0.0, enemy_health_decrease_reward
-            )
-            won_battle = jnp.all(
-                jnp.logical_not(
-                    jax.lax.dynamic_slice_in_dim(
-                        state.unit_alive, other_team_start_idx, enemy_team_size
+        ally_win_bonus = jax.lax.cond(
+            won & ~lost, lambda: self.won_battle_bonus, lambda: 0.0
+        )
+        ally_loss_bonus = jax.lax.cond(
+            lost & self.use_self_play_reward & ~won,
+            lambda: -self.won_battle_bonus,
+            lambda: 0.0,
+        )
+        enemy_win_bonus = jax.lax.cond(
+            lost & ~won, lambda: self.won_battle_bonus, lambda: 0.0
+        )
+        enemy_loss_bonus = jax.lax.cond(
+            won & self.use_self_play_reward & ~lost,
+            lambda: -self.won_battle_bonus,
+            lambda: 0.0,
+        )
+
+        if self.reward_type == "dense":
+            # Normalised total health damage dealt to enemy team + win bonus, shared by all allies
+            enemy_max_hp = self.unit_type_health[state.unit_types[self.num_allies :]]
+            damage_reward = (
+                jnp.sum(
+                    jnp.maximum(
+                        0.0,
+                        health_before[self.num_allies :] - health_after[self.num_allies :],
                     )
+                    / enemy_max_hp
                 )
+                / self.num_enemies
             )
-            lost_battle = jnp.all(
-                jnp.logical_not(
-                    jax.lax.dynamic_slice_in_dim(
-                        state.unit_alive, team_start_idx, team_size
-                    )
-                )
-            )
-            # have a lost battle bonus in addition to the won bonus in
-            # order to make the game zero-sum in self-play and therefore prevent any
-            # collaboration.
-            lost_battle_bonus = jax.lax.cond(
-                lost_battle & self.use_self_play_reward & ~won_battle,
-                lambda: -self.won_battle_bonus,
-                lambda: 0.0,
-            )
-            # only award the won_battle_bonus when all the enemy is dead
-            # AND there is at least one ally alive. Otherwise it's a draw.
-            # This can't happen in SC2 because actions happen in a random order,
-            # but I'd rather VMAP over events where possible, which means we
-            # can get draws.
-            won_battle_bonus = jax.lax.cond(
-                won_battle & ~lost_battle, lambda: self.won_battle_bonus, lambda: 0.0
-            )
-            return enemy_health_decrease_reward + won_battle_bonus + lost_battle_bonus
+            damage_reward = jax.lax.select(self.use_self_play_reward, 0.0, damage_reward)
 
-        # agents still get reward when they are dead to allow for noble sacrifice
-        team_rewards = [compute_team_reward(i) for i in range(2)]
+            ally_max_hp = self.unit_type_health[state.unit_types[: self.num_allies]]
+            enemy_damage_reward = (
+                jnp.sum(
+                    jnp.maximum(
+                        0.0,
+                        health_before[: self.num_allies] - health_after[: self.num_allies],
+                    )
+                    / ally_max_hp
+                )
+                / self.num_allies
+            )
+            enemy_damage_reward = jax.lax.select(
+                self.use_self_play_reward, 0.0, enemy_damage_reward
+            )
+
+            ally_r = damage_reward + ally_win_bonus + ally_loss_bonus
+            enemy_r = enemy_damage_reward + enemy_win_bonus + enemy_loss_bonus
+
+        elif self.reward_type == "sparse":
+            # Terminal signal only: win bonus on episode end, nothing per step
+            ally_r = ally_win_bonus + ally_loss_bonus
+            enemy_r = enemy_win_bonus + enemy_loss_bonus
+
+        elif self.reward_type == "death_triggered":
+            # Kill bonus each time an enemy dies this step + win bonus at end
+            # Fires more frequently than sparse, less noisy than dense
+            enemy_killed = (health_before[self.num_allies :] > 0) & (
+                health_after[self.num_allies :] <= 0
+            )
+            kill_bonus = (
+                jnp.sum(enemy_killed).astype(float) * self.won_battle_bonus / self.num_enemies
+            )
+            ally_r = kill_bonus + ally_win_bonus + ally_loss_bonus
+
+            ally_killed = (health_before[: self.num_allies] > 0) & (
+                health_after[: self.num_allies] <= 0
+            )
+            enemy_kill_bonus = (
+                jnp.sum(ally_killed).astype(float) * self.won_battle_bonus / self.num_allies
+            )
+            enemy_r = enemy_kill_bonus + enemy_win_bonus + enemy_loss_bonus
+
+        elif self.reward_type in ("individual_dense", "individual_sparse"):
+            # --- Per-ally credit via attack target attribution ---
+            # prev_attack_actions[i] = 0          → not attacking (movement/stop)
+            # prev_attack_actions[i] >= num_movement_actions → attacking
+            # target absolute index = num_allies + attack_action - num_movement_actions
+            ally_attacks = state.prev_attack_actions[: self.num_allies]
+            is_attacking = ally_attacks >= self.num_movement_actions
+
+            # Clamp to valid enemy index range so indexing is always safe
+            target_abs = jnp.clip(
+                self.num_allies + ally_attacks - self.num_movement_actions,
+                self.num_allies,
+                self.num_agents - 1,
+            )
+
+            if self.reward_type == "individual_dense":
+                # Normalised health damage dealt to each ally's specific target
+                target_max_hp = self.unit_type_health[state.unit_types[target_abs]]
+                damage = (
+                    jnp.maximum(0.0, health_before[target_abs] - health_after[target_abs])
+                    / target_max_hp
+                )
+                per_ally_r = (
+                    jnp.where(is_attacking, damage, 0.0) + ally_win_bonus + ally_loss_bonus
+                )
+
+            else:  # individual_sparse
+                # Kill credit: reward only when the target this step transitions alive→dead
+                target_died = (health_before[target_abs] > 0) & (
+                    health_after[target_abs] <= 0
+                )
+                kill_credit = jnp.where(
+                    is_attacking & target_died,
+                    self.won_battle_bonus / self.num_enemies,
+                    0.0,
+                )
+                per_ally_r = kill_credit + ally_win_bonus + ally_loss_bonus
+
+            enemy_r = enemy_win_bonus + enemy_loss_bonus
+            return {
+                **{f"ally_{i}": per_ally_r[i] for i in range(self.num_allies)},
+                **{f"enemy_{i}": enemy_r for i in range(self.num_enemies)},
+            }
+
+        else:
+            raise ValueError(
+                f"Unknown reward_type: {self.reward_type!r}. "
+                "Choose from 'dense', 'sparse', 'death_triggered', "
+                "'individual_dense', 'individual_sparse'."
+            )
+
+        # Team-level reward: same scalar for all agents on each side
         return {
-            agent: team_rewards[int(self.agent_ids[agent] >= self.num_allies)]
-            for agent in self.agents
+            **{agent: ally_r for agent in self.agents[: self.num_allies]},
+            **{agent: enemy_r for agent in self.agents[self.num_allies :]},
         }
 
     @partial(jax.jit, static_argnums=(0,))
