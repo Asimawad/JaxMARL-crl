@@ -394,7 +394,9 @@ class SMAX(MultiAgentEnv):
         ------------
         dense             : team-shared normalised health-damage per step + win bonus
         sparse            : team-shared win bonus only, no per-step signal
+        win_loss          : team-shared +1 on win / -1 on loss, nothing per step (SMACv2)
         death_triggered   : team-shared kill bonus per enemy death + win bonus
+        shaped            : dense enemy damage - ally damage taken + win bonus
         individual_dense  : per-ally normalised damage to own target + shared win bonus
         individual_sparse : per-ally kill credit when own target dies + shared win bonus
 
@@ -459,6 +461,60 @@ class SMAX(MultiAgentEnv):
             # Terminal signal only: win bonus on episode end, nothing per step
             ally_r = ally_win_bonus + ally_loss_bonus
             enemy_r = enemy_win_bonus + enemy_loss_bonus
+
+        elif self.reward_type == "win_loss":
+            # SMACv2-style: +won_battle_bonus on win, -won_battle_bonus on loss, 0 per step.
+            # Different from sparse (which gives 0 on loss) — losing is actively penalised,
+            # giving a gradient signal on failed episodes.
+            ally_win = jax.lax.cond(
+                won & ~lost, lambda: self.won_battle_bonus, lambda: 0.0
+            )
+            ally_loss = jax.lax.cond(
+                lost & ~won, lambda: -self.won_battle_bonus, lambda: 0.0
+            )
+            ally_r = ally_win + ally_loss
+
+            enemy_win = jax.lax.cond(
+                lost & ~won, lambda: self.won_battle_bonus, lambda: 0.0
+            )
+            enemy_loss = jax.lax.cond(
+                won & ~lost, lambda: -self.won_battle_bonus, lambda: 0.0
+            )
+            enemy_r = enemy_win + enemy_loss
+
+        elif self.reward_type == "shaped":
+            # Dense enemy damage - ally damage taken + win bonus.
+            # Adds a negative per-step component: agents are penalised for
+            # taking damage, not just rewarded for dealing it.
+            # Mirrors SMAC's reward_only_positive=False design.
+            enemy_max_hp = self.unit_type_health[state.unit_types[self.num_allies :]]
+            enemy_damage = (
+                jnp.sum(
+                    jnp.maximum(
+                        0.0,
+                        health_before[self.num_allies :] - health_after[self.num_allies :],
+                    )
+                    / enemy_max_hp
+                )
+                / self.num_enemies
+            )
+
+            ally_max_hp = self.unit_type_health[state.unit_types[: self.num_allies]]
+            ally_damage_taken = (
+                jnp.sum(
+                    jnp.maximum(
+                        0.0,
+                        health_before[: self.num_allies] - health_after[: self.num_allies],
+                    )
+                    / ally_max_hp
+                )
+                / self.num_allies
+            )
+
+            ally_r = enemy_damage - ally_damage_taken + ally_win_bonus + ally_loss_bonus
+
+            # Symmetric for enemy team
+            enemy_r = ally_damage_taken - enemy_damage + enemy_win_bonus + enemy_loss_bonus
 
         elif self.reward_type == "death_triggered":
             # Kill bonus each time an enemy dies this step + win bonus at end
@@ -526,8 +582,8 @@ class SMAX(MultiAgentEnv):
         else:
             raise ValueError(
                 f"Unknown reward_type: {self.reward_type!r}. "
-                "Choose from 'dense', 'sparse', 'death_triggered', "
-                "'individual_dense', 'individual_sparse'."
+                "Choose from 'dense', 'sparse', 'win_loss', 'shaped', "
+                "'death_triggered', 'individual_dense', 'individual_sparse'."
             )
 
         # Team-level reward: same scalar for all agents on each side
